@@ -7,3 +7,6 @@ dist/
 .env.*
 *.secret
 .dev.vars
+
+# npm auth — never commit a token to a public repo
+.npmrc
