@@ -63,6 +63,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aswincloud/auth.git"
+    "url": "git+https://github.com/Aswincloud/auth.git"
+  },
+  "homepage": "https://github.com/Aswincloud/auth#readme",
+  "bugs": {
+    "url": "https://github.com/Aswincloud/auth/issues"
   }
 }
