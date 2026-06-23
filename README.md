@@ -1,8 +1,16 @@
 # @aswincloud/auth
 
+[![npm](https://img.shields.io/npm/v/@aswincloud/auth?color=cb3837&logo=npm)](https://www.npmjs.com/package/@aswincloud/auth)
+[![CI](https://github.com/Aswincloud/auth/actions/workflows/ci.yml/badge.svg)](https://github.com/Aswincloud/auth/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![zero deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#)
+
+> Drop-in auth for Cloudflare Workers sites. Write the login plumbing **once**,
+> reuse it across every site — each keeping its **own** database, fully isolated.
+
 Shared, framework-agnostic auth primitives for Cloudflare Workers sites — signed
-sessions, HMAC tokens, PBKDF2 password hashing, owner allowlists, and OAuth —
-plus an optional React login UI.
+sessions, HMAC tokens, PBKDF2 password hashing, owner allowlists, and OAuth
+(Google / GitHub / Microsoft) — plus an optional React login UI.
 
 **Each consuming site brings its own D1 database and its own secrets. Nothing in
 this package links sites together.** Security rests on your per-site
