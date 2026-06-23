@@ -1,0 +1,67 @@
+{
+  "name": "@aswincloud/auth",
+  "version": "0.0.0",
+  "description": "Shared, framework-agnostic auth primitives for Cloudflare Workers sites (Web Crypto sessions, signed tokens, password hashing, OAuth) plus an optional React login UI. Each consuming site brings its own D1 database and secrets; nothing links sites together.",
+  "license": "MIT",
+  "author": "Aswin",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260623.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "auth",
+    "session",
+    "d1",
+    "web-crypto",
+    "login"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aswincloud/auth.git"
+  }
+}

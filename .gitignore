@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# never commit secrets — this is a public package
+.env
+.env.*
+*.secret
+.dev.vars
