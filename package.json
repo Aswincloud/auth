@@ -7,8 +7,13 @@
   "type": "module",
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "schema.sql",
+    "bin"
   ],
+  "bin": {
+    "aswincloud-auth-setup-db": "bin/setup-db.mjs"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

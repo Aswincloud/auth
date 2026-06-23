@@ -22,6 +22,32 @@ this package links sites together.** Security rests on your per-site
 npm install @aswincloud/auth
 ```
 
+## New site? Each gets its OWN database
+
+This package never shares a database between sites — every site you build gets
+its own isolated D1, so nothing is linked. Setting one up is one command:
+
+```sh
+# creates the D1, prints the binding to paste into wrangler.jsonc, applies the schema
+npx aswincloud-auth-setup-db mysite-db
+```
+
+Or do it by hand:
+
+```sh
+npx wrangler d1 create mysite-db          # → copy the database_id it prints
+# paste into wrangler.jsonc:
+#   "d1_databases": [{ "binding": "DB", "database_name": "mysite-db",
+#                      "database_id": "<id>" }]
+npx wrangler d1 execute mysite-db --remote \
+  --file=node_modules/@aswincloud/auth/schema.sql
+```
+
+`schema.sql` creates `users`, `oauth_identities`, and `otp_codes` — all
+`IF NOT EXISTS`, so re-running is safe, and you add your own app tables
+alongside them in your own migrations. Then set per-site secrets
+(`SESSION_SECRET`, OAuth client ids).
+
 ## Two entry points
 
 ```ts
