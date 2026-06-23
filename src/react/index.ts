@@ -1,5 +1,5 @@
 /**
- * @aswincloud/auth/react — optional React login UI.
+ * @aswincloud/auth/react — optional React UI (login form + SSO buttons).
  *
  * Imports React (a peer dependency). Owner-only Worker sites should NOT import
  * this entry point; use the core `@aswincloud/auth` instead. Framework-agnostic:
@@ -12,3 +12,6 @@ export type {
   LoginPageStyles,
   LoginResult,
 } from "./LoginPage.js";
+
+export { SsoButtons } from "./SsoButtons.js";
+export type { SsoButtonsProps } from "./SsoButtons.js";

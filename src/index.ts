@@ -35,9 +35,21 @@ export {
 export type { SessionConfig } from "./session.js";
 export { parseAllowlist, isOwner } from "./owner.js";
 
-// OAuth (Google) — currently stubbed; see source TODOs
+// OAuth — Google, GitHub, Microsoft. Authenticates the user with the provider
+// and returns a verified identity; DB linking stays in the consuming site.
 export {
-  startGoogleLogin,
-  handleGoogleCallback,
-} from "./oauth-google.js";
-export type { GoogleOAuthConfig, GoogleIdentity } from "./oauth-google.js";
+  startOAuth,
+  handleOAuthCallback,
+  clearStateCookie,
+  isProviderConfigured,
+  configuredProviders,
+  providerName,
+  ALL_PROVIDERS,
+} from "./oauth.js";
+export type {
+  ProviderId,
+  OAuthUser,
+  OAuthClients,
+  OAuthConfig,
+  OAuthCallbackResult,
+} from "./oauth.js";
