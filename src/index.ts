@@ -35,6 +35,15 @@ export {
 export type { SessionConfig } from "./session.js";
 export { parseAllowlist, isOwner } from "./owner.js";
 
+// Per-site access policy (public / domain / owners) on top of the allowlist.
+export { emailAllowed, parseDomains, parseAccessMode } from "./access.js";
+export type { AccessMode } from "./access.js";
+
+// Broker relay: HMAC-signed identity hand-off between a central OAuth broker
+// and a registered site (per-site shared secret). See @aswincloud/auth broker.
+export { signRelay, verifyRelay } from "./broker.js";
+export type { RelayClaims } from "./broker.js";
+
 // OAuth — Google, GitHub, Microsoft. Authenticates the user with the provider
 // and returns a verified identity; DB linking stays in the consuming site.
 export {

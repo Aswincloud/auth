@@ -126,6 +126,50 @@ const setCookie = await createSessionCookie(session, r.user.email);
 // The package never touches a database — each site keeps its own, fully isolated.
 ```
 
+## Who can sign in — access policy
+
+`emailAllowed` decides whether a provider-verified email may sign in, in one of
+three modes a site picks (e.g. from an `ACCESS_MODE` env):
+
+```ts
+import { emailAllowed } from "@aswincloud/auth";
+
+// "public"  → any authenticated email
+// "domain"  → only emails in ACCESS_DOMAINS (owners, if any, also allowed)
+// "owners"  → only emails in the OWNER_EMAILS allowlist (strict "only me")
+if (!emailAllowed({
+  mode: env.ACCESS_MODE,          // "public" | "domain" | "owners"
+  email: r.user.email,
+  owners: env.OWNER_EMAILS,       // comma-separated
+  domains: env.ACCESS_DOMAINS,    // comma-separated, e.g. "aswincloud.com"
+})) return new Response("forbidden", { status: 403 });
+```
+
+`parseAccessMode(raw)` normalizes the env string (unknown ⇒ `"owners"`, the safe
+default). Pure and zero-dep.
+
+## Central OAuth broker (relay)
+
+For many sites that shouldn't each register their own OAuth client, a central
+broker authenticates with the provider once and relays the verified email back
+to each site, signed with a **per-site shared secret** (`RELAY_SECRET`):
+
+```ts
+import { signRelay, verifyRelay } from "@aswincloud/auth";
+
+// On the broker, after handleOAuthCallback succeeds:
+const relay = await signRelay(site.relaySecret, { email, provider, nonce });
+// → 302 back to the site with ?relay=<relay>
+
+// On the site's callback:
+const claims = await verifyRelay(env.RELAY_SECRET, relayToken); // {email,provider,nonce} | null
+if (!claims || claims.nonce !== expectedNonce) return forbidden();
+```
+
+Short-lived (2 min) and purpose-bound; the `nonce` (echoed from the site's start
+request) defends against replay. The broker Worker itself lives outside this
+package; these are just the shared sign/verify helpers.
+
 Provider notes: Google & Microsoft return verified emails; GitHub falls back to
 `/user/emails` for the primary verified address. Microsoft uses your tenant in
 the URL. CSRF is the HMAC-signed state cookie (checked against the returned

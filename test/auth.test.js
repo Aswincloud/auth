@@ -23,6 +23,11 @@ import {
   constantTimeEqual,
   b64urlEncode,
   b64urlDecode,
+  emailAllowed,
+  parseDomains,
+  parseAccessMode,
+  signRelay,
+  verifyRelay,
 } from "../dist/index.js";
 
 import {
@@ -260,4 +265,70 @@ test("SsoButtons renders all three providers", () => {
 
 test("SsoButtons renders nothing for empty list", () => {
   assert.equal(renderToStaticMarkup(h(SsoButtons, { providers: [] })), "");
+});
+
+// ---------------------------------------------------------------- access policy
+test("parseDomains normalizes + strips @", () => {
+  const d = parseDomains(" Aswincloud.com, @Example.COM ,, ");
+  assert.deepEqual([...d].sort(), ["aswincloud.com", "example.com"]);
+  assert.equal(parseDomains(undefined).size, 0);
+});
+
+test("parseAccessMode falls back to owners on unknown/empty", () => {
+  assert.equal(parseAccessMode("public"), "public");
+  assert.equal(parseAccessMode("DOMAIN"), "domain");
+  assert.equal(parseAccessMode("owners"), "owners");
+  assert.equal(parseAccessMode("nonsense"), "owners");
+  assert.equal(parseAccessMode(undefined), "owners");
+});
+
+test("emailAllowed: public mode lets any non-empty email in", () => {
+  assert.equal(emailAllowed({ mode: "public", email: "anyone@x.com" }), true);
+  assert.equal(emailAllowed({ mode: "public", email: "" }), false);
+  assert.equal(emailAllowed({ mode: "public", email: "   " }), false);
+});
+
+test("emailAllowed: owners mode is the strict allowlist", () => {
+  const owners = "me@x.com, you@y.com";
+  assert.equal(emailAllowed({ mode: "owners", email: "ME@X.com", owners }), true);
+  assert.equal(emailAllowed({ mode: "owners", email: "stranger@z.com", owners }), false);
+  // empty owners ⇒ isOwner treats as "anyone" — document that callers must supply owners.
+  assert.equal(emailAllowed({ mode: "owners", email: "any@x.com", owners: "" }), true);
+  assert.equal(emailAllowed({ mode: "owners", email: "", owners }), false);
+});
+
+test("emailAllowed: domain mode allows in-domain + explicit owners, rejects others", () => {
+  const domains = "aswincloud.com";
+  const owners = "guest@gmail.com";
+  assert.equal(emailAllowed({ mode: "domain", email: "a@aswincloud.com", domains }), true);
+  assert.equal(emailAllowed({ mode: "domain", email: "a@OTHER.com", domains }), false);
+  // off-domain owner still allowed (union)
+  assert.equal(emailAllowed({ mode: "domain", email: "guest@gmail.com", domains, owners }), true);
+  // no owners list ⇒ off-domain rejected (must NOT inherit isOwner empty="anyone")
+  assert.equal(emailAllowed({ mode: "domain", email: "x@other.com", domains, owners: "" }), false);
+  // malformed email ⇒ false
+  assert.equal(emailAllowed({ mode: "domain", email: "no-at-sign", domains }), false);
+  assert.equal(emailAllowed({ mode: "domain", email: "trailing@", domains }), false);
+});
+
+// ---------------------------------------------------------------- broker relay
+test("signRelay / verifyRelay round-trips claims", async () => {
+  const tok = await signRelay("site-secret", { email: "u@x.com", provider: "google", nonce: "n1" });
+  const claims = await verifyRelay("site-secret", tok);
+  assert.deepEqual(claims, { email: "u@x.com", provider: "google", nonce: "n1" });
+});
+
+test("verifyRelay rejects wrong secret, tamper, expiry, malformed", async () => {
+  const tok = await signRelay("site-a-secret", { email: "u@x.com", provider: "github", nonce: "n" });
+  assert.equal(await verifyRelay("site-b-secret", tok), null); // different site's secret
+  assert.equal(await verifyRelay("site-a-secret", tok + "x"), null); // tampered
+  assert.equal(await verifyRelay("site-a-secret", "garbage.token"), null); // malformed (0.3.1 fix)
+  const expired = await signRelay("site-a-secret", { email: "u@x.com", provider: "google", nonce: "n" }, -1);
+  assert.equal(await verifyRelay("site-a-secret", expired), null); // expired
+});
+
+test("verifyRelay rejects a token signed for a different purpose", async () => {
+  // A session token must not pass as a relay (purpose binding).
+  const sess = await signToken("site-secret", "u@x.com", "session", 3600);
+  assert.equal(await verifyRelay("site-secret", sess), null);
 });
