@@ -1,6 +1,6 @@
 {
   "name": "@aswincloud/auth",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Shared, framework-agnostic auth primitives for Cloudflare Workers sites (Web Crypto sessions, signed tokens, password hashing, OAuth) plus an optional React login UI. Each consuming site brings its own D1 database and secrets; nothing links sites together.",
   "license": "MIT",
   "author": "Aswin",
