@@ -58,10 +58,12 @@ export async function verifyToken(
   if (parts.length !== 2) return null;
   const [body, sig] = parts as [string, string];
   const expected = await hmac(secret, body);
-  const actual = b64urlDecode(sig);
-  if (!constantTimeEqual(expected, actual)) return null;
   let payload: Payload;
   try {
+    // Both decodes can throw on a malformed/garbage token (atob → DOMException);
+    // a bad token is "invalid", not an error, so swallow and return null.
+    const actual = b64urlDecode(sig);
+    if (!constantTimeEqual(expected, actual)) return null;
     payload = JSON.parse(new TextDecoder().decode(b64urlDecode(body))) as Payload;
   } catch {
     return null;

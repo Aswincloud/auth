@@ -75,6 +75,14 @@ test("verifyToken rejects expired", async () => {
   assert.equal(await verifyToken("secret", t, "session"), null);
 });
 
+test("verifyToken returns null (not throws) on malformed/garbage tokens", async () => {
+  // atob() throws a DOMException on non-base64 input; a bad token is "invalid",
+  // not an error — these must all resolve to null, never reject.
+  for (const bad of ["garbage.token", "...", "a.b.c", "!!!.???", ".", "x."]) {
+    assert.equal(await verifyToken("secret", bad, "session"), null, `for ${JSON.stringify(bad)}`);
+  }
+});
+
 // ---------------------------------------------------------------- random
 test("newUlid is 26 chars and time-sortable", () => {
   const a = newUlid(1000);
