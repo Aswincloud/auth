@@ -161,6 +161,63 @@ Framework-agnostic — no `next/*` imports, so it runs on Next, Vite, or plain
 React. Self-contained default styling; every element overridable via `styles`.
 Navigation is yours via `onSuccess`. Drop SSO buttons in through `ssoSlot`.
 
+## User-management flows — `@aswincloud/auth/d1`
+
+A separate, opt-in entry point with DB-backed flows for multi-user sites:
+signup + OTP verify, password reset, change password/username, self-service
+email change, and account removal. The core stays zero-dep — only import `/d1`
+where you need it.
+
+Flows are **functions, not HTTP handlers**: each takes your D1 binding + plain
+values and returns `{ ok: true, … } | { ok: false, error: "<code>" }` — never
+throws. You own the routing, the session cookie, and the email provider.
+
+```ts
+import {
+  signup, verifyOtp, requestPasswordReset, resetPassword,
+  changePassword, requestEmailChange, confirmEmailChange, removeUser,
+  type EmailSender,
+} from "@aswincloud/auth/d1";
+import { createSessionCookie } from "@aswincloud/auth";
+
+// You inject the email provider — the package never hardcodes one:
+const sendEmail: EmailSender = async ({ to, subject, html, text }) => {
+  await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: env.MAIL_FROM, to, subject, html, text }),
+  });
+};
+
+// POST /api/auth/forgot
+await requestPasswordReset(env.DB, {
+  email, secret: env.TOKEN_SECRET, sendEmail, appUrl: origin,
+}); // always { ok: true } — no account enumeration
+
+// POST /api/auth/reset
+const r = await resetPassword(env.DB, { token, newPassword, secret: env.TOKEN_SECRET });
+if (!r.ok) return json({ error: r.error }, 400);
+
+// POST /api/auth/verify  → issue the session yourself on success
+const v = await verifyOtp(env.DB, { email, code, secret: env.TOKEN_SECRET });
+if (v.ok) setCookie(await createSessionCookie(session, v.userId));
+```
+
+Pure email templates ship too (`passwordResetEmail`, `verifyEmail`, `otpEmail`,
+`emailChangeEmail`, `accountDeletedEmail`) returning `{ subject, html, text }` —
+use them or write your own. Matching React pages: `ForgotPasswordPage`,
+`ResetPasswordPage`, `VerifyEmailPage` from `@aswincloud/auth/react`.
+
+**Schema (0.2.0):** the `users` table gained `name` + `is_admin`. New sites get
+them from `schema.sql`. **Existing DBs** (created before 0.2.0) — run once:
+
+```sql
+ALTER TABLE users ADD COLUMN name TEXT;
+ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;
+```
+
+Sites using only the core primitives (no `/d1`) need no migration.
+
 ## License
 
 MIT

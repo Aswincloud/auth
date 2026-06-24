@@ -15,3 +15,12 @@ export type {
 
 export { SsoButtons } from "./SsoButtons.js";
 export type { SsoButtonsProps } from "./SsoButtons.js";
+
+// User-management pages (pair with @aswincloud/auth/d1 flows).
+export { ForgotPasswordPage } from "./ForgotPasswordPage.js";
+export type { ForgotPasswordPageProps } from "./ForgotPasswordPage.js";
+export { ResetPasswordPage } from "./ResetPasswordPage.js";
+export type { ResetPasswordPageProps } from "./ResetPasswordPage.js";
+export { VerifyEmailPage } from "./VerifyEmailPage.js";
+export type { VerifyEmailPageProps } from "./VerifyEmailPage.js";
+export type { AuthPageStyles } from "./styles.js";

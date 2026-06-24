@@ -13,8 +13,14 @@ CREATE TABLE IF NOT EXISTS users (
   email          TEXT NOT NULL UNIQUE COLLATE NOCASE,    -- case-insensitive unique
   password_hash  TEXT NOT NULL,                          -- pbkdf2$... from hashPassword()
   email_verified INTEGER NOT NULL DEFAULT 0,             -- 0/1
-  created_at     INTEGER NOT NULL                        -- epoch ms
+  name           TEXT,                                   -- display name, nullable
+  is_admin       INTEGER NOT NULL DEFAULT 0,             -- 0/1
+  created_at     INTEGER NOT NULL                        -- epoch seconds
 );
+
+-- Existing DBs created before 0.2.0 (no name/is_admin columns): run once —
+--   ALTER TABLE users ADD COLUMN name TEXT;
+--   ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;
 
 -- Linked social logins (Google / GitHub / Microsoft). A user can have several.
 -- PK is (provider, provider_user_id) so the same provider account maps to one row.
