@@ -215,6 +215,33 @@ test("email templates return non-empty subject/html/text with the data", () => {
   assert.ok(accountDeletedEmail({ appName: "Acme" }).subject.includes("Acme"));
 });
 
+// ---------------------------------------------------------------- render overrides
+test("render* overrides replace the built-in template in flows", async () => {
+  const db = makeFakeDb();
+  const c = collector();
+  // signup with a renderOtp override
+  await signup(db, {
+    email: "ov@x.com", password: "hunter2pw", secret: SECRET, sendEmail: c.sendEmail,
+    newUserId: () => "u-ov",
+    renderOtp: ({ code, ttlMinutes }) => ({
+      subject: `BRANDED-OTP ${ttlMinutes}m`, html: `<b>BRANDED ${code}</b>`, text: `branded ${code}`,
+    }),
+  });
+  assert.ok(c.sent[0].subject.startsWith("BRANDED-OTP"));
+  assert.ok(c.sent[0].html.includes("BRANDED"));
+  assert.ok(!c.sent[0].html.includes("verification code we emailed")); // built-in copy absent
+
+  // requestPasswordReset with a renderReset override (user must exist to send)
+  await createUser(db, { id: "u-r", email: "r@x.com", passwordHash: await hashPassword("oldpassw") });
+  const c2 = collector();
+  await requestPasswordReset(db, {
+    email: "r@x.com", secret: SECRET, sendEmail: c2.sendEmail, appUrl: "https://s.com",
+    renderReset: ({ resetUrl }) => ({ subject: "BRANDED-RESET", html: `go ${resetUrl}`, text: resetUrl }),
+  });
+  assert.equal(c2.sent[0].subject, "BRANDED-RESET");
+  assert.ok(c2.sent[0].html.includes("https://s.com/reset?token=")); // flow still builds the URL
+});
+
 // ---------------------------------------------------------------- react pages
 test("auth pages render and contain no next/* import in output", async () => {
   const forgot = renderToStaticMarkup(h(ForgotPasswordPage, { loginHref: "/login" }));

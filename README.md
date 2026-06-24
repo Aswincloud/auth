@@ -208,6 +208,19 @@ Pure email templates ship too (`passwordResetEmail`, `verifyEmail`, `otpEmail`,
 use them or write your own. Matching React pages: `ForgotPasswordPage`,
 `ResetPasswordPage`, `VerifyEmailPage` from `@aswincloud/auth/react`.
 
+**Branded emails** — to keep your own look instead of the built-in template,
+pass a `render*` override to the sending flows; it gets the dynamic bits and
+returns `{ subject, html, text }`:
+
+```ts
+await signup(env.DB, { email, password, secret, sendEmail,
+  renderOtp: ({ code, ttlMinutes }) => myOtpEmail({ code, ttlMinutes }) });
+// likewise: requestPasswordReset → renderReset({ resetUrl, ttlHours }),
+//           requestEmailChange   → renderEmailChange({ confirmUrl, newEmail, ttlHours }).
+```
+
+When omitted, the built-in template is used (app name via `appName`).
+
 **Schema (0.2.0):** the `users` table gained `name` + `is_admin`. New sites get
 them from `schema.sql`. **Existing DBs** (created before 0.2.0) — run once:
 

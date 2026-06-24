@@ -62,7 +62,7 @@ export {
   confirmEmailChange,
   removeUser,
 } from "./flows.js";
-export type { Result } from "./flows.js";
+export type { Result, RenderOtp, RenderReset, RenderEmailChange } from "./flows.js";
 
 // types + sentinels
 export { OAUTH_ONLY_HASH, hasRealPassword } from "./types.js";

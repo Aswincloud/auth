@@ -24,9 +24,17 @@ import {
 } from "./users.js";
 import { generateOtp, hashOtp, otpHashEquals, OTP_TTL_SECONDS, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_SECONDS } from "./otp.js";
 import { OAUTH_ONLY_HASH, hasRealPassword, type D1Database, type EmailSender } from "./types.js";
-import { passwordResetEmail, verifyEmail as verifyEmailTpl, otpEmail, emailChangeEmail } from "./email.js";
+import { passwordResetEmail, verifyEmail as verifyEmailTpl, otpEmail, emailChangeEmail, type EmailTemplate } from "./email.js";
 
 export type Result<E extends string, T = Record<never, never>> = ({ ok: true } & T) | { ok: false; error: E };
+
+// Optional template-render overrides. A consumer passes one of these to emit
+// its own branded HTML; when omitted, the flow uses the built-in template. The
+// flow still owns when/whether to send and what URL/code goes in — the override
+// only controls the {subject,html,text}.
+export type RenderOtp = (args: { code: string; ttlMinutes: number }) => EmailTemplate;
+export type RenderReset = (args: { resetUrl: string; ttlHours: number }) => EmailTemplate;
+export type RenderEmailChange = (args: { confirmUrl: string; newEmail: string; ttlHours: number }) => EmailTemplate;
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const MIN_PASSWORD = 8;
@@ -37,7 +45,7 @@ const normEmail = (e: string) => e.trim().toLowerCase();
 
 export async function signup(
   db: D1Database,
-  args: { email: string; password: string; secret: string; sendEmail: EmailSender; appName?: string; otpTtlSeconds?: number; newUserId?: () => string },
+  args: { email: string; password: string; secret: string; sendEmail: EmailSender; appName?: string; otpTtlSeconds?: number; newUserId?: () => string; renderOtp?: RenderOtp },
 ): Promise<Result<"invalid_email" | "weak_password" | "send_failed", { status: "pending_verification" }>> {
   const email = normEmail(args.email);
   if (!EMAIL_RE.test(email)) return { ok: false, error: "invalid_email" };
@@ -57,7 +65,8 @@ export async function signup(
   const code = generateOtp();
   const ttl = args.otpTtlSeconds ?? OTP_TTL_SECONDS;
   await upsertOtp(db, email, await hashOtp(code, args.secret), nowSec() + ttl);
-  const tpl = otpEmail({ code, ttlMinutes: Math.round(ttl / 60), appName: args.appName });
+  const ttlMinutes = Math.round(ttl / 60);
+  const tpl = args.renderOtp?.({ code, ttlMinutes }) ?? otpEmail({ code, ttlMinutes, appName: args.appName });
   try {
     await args.sendEmail({ to: email, ...tpl });
   } catch {
@@ -90,7 +99,7 @@ export async function verifyOtp(
 
 export async function resendOtp(
   db: D1Database,
-  args: { email: string; secret: string; sendEmail: EmailSender; appName?: string; otpTtlSeconds?: number; cooldownSeconds?: number },
+  args: { email: string; secret: string; sendEmail: EmailSender; appName?: string; otpTtlSeconds?: number; cooldownSeconds?: number; renderOtp?: RenderOtp },
 ): Promise<Result<"no_account" | "cooldown" | "send_failed", { status: "sent" }>> {
   const email = normEmail(args.email);
   const user = await getUserByEmail(db, email);
@@ -102,7 +111,8 @@ export async function resendOtp(
   const code = generateOtp();
   const ttl = args.otpTtlSeconds ?? OTP_TTL_SECONDS;
   await upsertOtp(db, email, await hashOtp(code, args.secret), nowSec() + ttl);
-  const tpl = otpEmail({ code, ttlMinutes: Math.round(ttl / 60), appName: args.appName });
+  const ttlMinutes = Math.round(ttl / 60);
+  const tpl = args.renderOtp?.({ code, ttlMinutes }) ?? otpEmail({ code, ttlMinutes, appName: args.appName });
   try {
     await args.sendEmail({ to: email, ...tpl });
   } catch {
@@ -119,7 +129,7 @@ export async function resendOtp(
  */
 export async function requestPasswordReset(
   db: D1Database,
-  args: { email: string; secret: string; sendEmail: EmailSender; appUrl: string; resetPath?: string; ttlSeconds?: number; appName?: string },
+  args: { email: string; secret: string; sendEmail: EmailSender; appUrl: string; resetPath?: string; ttlSeconds?: number; appName?: string; renderReset?: RenderReset },
 ): Promise<{ ok: true }> {
   const email = normEmail(args.email);
   const user = await getUserByEmail(db, email);
@@ -128,7 +138,8 @@ export async function requestPasswordReset(
     const token = await signToken(args.secret, user.id, "password_reset", ttl);
     const path = args.resetPath ?? "/reset";
     const resetUrl = `${args.appUrl.replace(/\/$/, "")}${path}?token=${encodeURIComponent(token)}`;
-    const tpl = passwordResetEmail({ resetUrl, ttlHours: Math.max(1, Math.round(ttl / 3600)), appName: args.appName });
+    const ttlHours = Math.max(1, Math.round(ttl / 3600));
+    const tpl = args.renderReset?.({ resetUrl, ttlHours }) ?? passwordResetEmail({ resetUrl, ttlHours, appName: args.appName });
     try {
       await args.sendEmail({ to: email, ...tpl });
     } catch {
@@ -185,7 +196,7 @@ export async function changeUsername(
 
 export async function requestEmailChange(
   db: D1Database,
-  args: { userId: string; newEmail: string; secret: string; sendEmail: EmailSender; appUrl: string; confirmPath?: string; ttlSeconds?: number; appName?: string },
+  args: { userId: string; newEmail: string; secret: string; sendEmail: EmailSender; appUrl: string; confirmPath?: string; ttlSeconds?: number; appName?: string; renderEmailChange?: RenderEmailChange },
 ): Promise<Result<"not_found" | "invalid_email" | "same_as_current" | "email_taken" | "send_failed", { status: "sent" }>> {
   const newEmail = normEmail(args.newEmail);
   if (!EMAIL_RE.test(newEmail)) return { ok: false, error: "invalid_email" };
@@ -201,7 +212,8 @@ export async function requestEmailChange(
   const token = await signToken(args.secret, `${user.id}:${newEmail}`, "email_change", ttl);
   const path = args.confirmPath ?? "/confirm-email";
   const confirmUrl = `${args.appUrl.replace(/\/$/, "")}${path}?token=${encodeURIComponent(token)}`;
-  const tpl = emailChangeEmail({ confirmUrl, newEmail, ttlHours: Math.max(1, Math.round(ttl / 3600)), appName: args.appName });
+  const ttlHours = Math.max(1, Math.round(ttl / 3600));
+  const tpl = args.renderEmailChange?.({ confirmUrl, newEmail, ttlHours }) ?? emailChangeEmail({ confirmUrl, newEmail, ttlHours, appName: args.appName });
   try {
     await args.sendEmail({ to: newEmail, ...tpl }); // sent to the NEW address — proves control
   } catch {
