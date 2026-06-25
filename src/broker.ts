@@ -24,6 +24,15 @@ export interface RelayClaims {
   provider: string;
   /** Opaque value the site generated and passed through ?nonce, echoed back to bind the round-trip. */
   nonce: string;
+  /**
+   * The provider's STABLE user id (e.g. Google `sub`, GitHub numeric id).
+   * Optional: owner-only sites that match purely on email can ignore it, but
+   * multi-user sites should link accounts on (provider, providerUserId) so a
+   * provider email change doesn't orphan the account. Packed into the token only
+   * when present, so tokens for sites that don't send it stay byte-identical to
+   * before this field existed.
+   */
+  providerUserId?: string;
 }
 
 /**
@@ -35,12 +44,15 @@ export function signRelay(
   claims: RelayClaims,
   ttlSeconds: number = DEFAULT_TTL_SECONDS,
 ): Promise<string> {
-  const subject = JSON.stringify({
+  const payload: { e: string; p: string; n: string; u?: string } = {
     e: claims.email,
     p: claims.provider,
     n: claims.nonce,
-  });
-  return signToken(relaySecret, subject, RELAY_PURPOSE, ttlSeconds);
+  };
+  // Include the provider user id only when given, so single-key sites (status)
+  // produce the same token shape as before this field existed.
+  if (claims.providerUserId) payload.u = claims.providerUserId;
+  return signToken(relaySecret, JSON.stringify(payload), RELAY_PURPOSE, ttlSeconds);
 }
 
 /**
@@ -52,10 +64,12 @@ export async function verifyRelay(relaySecret: string, token: string): Promise<R
   const subject = await verifyToken(relaySecret, token, RELAY_PURPOSE);
   if (!subject) return null;
   try {
-    const o = JSON.parse(subject) as { e?: unknown; p?: unknown; n?: unknown };
+    const o = JSON.parse(subject) as { e?: unknown; p?: unknown; n?: unknown; u?: unknown };
     if (typeof o.e !== "string" || typeof o.p !== "string" || typeof o.n !== "string") return null;
     if (!o.e || !o.p) return null;
-    return { email: o.e, provider: o.p, nonce: o.n };
+    const claims: RelayClaims = { email: o.e, provider: o.p, nonce: o.n };
+    if (typeof o.u === "string" && o.u) claims.providerUserId = o.u; // optional
+    return claims;
   } catch {
     return null;
   }

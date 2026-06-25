@@ -158,11 +158,13 @@ to each site, signed with a **per-site shared secret** (`RELAY_SECRET`):
 import { signRelay, verifyRelay } from "@aswincloud/auth";
 
 // On the broker, after handleOAuthCallback succeeds:
-const relay = await signRelay(site.relaySecret, { email, provider, nonce });
+const relay = await signRelay(site.relaySecret, { email, provider, nonce, providerUserId });
 // → 302 back to the site with ?relay=<relay>
+// providerUserId is optional: owner-only sites can omit it (token shape is then
+// unchanged); multi-user sites link accounts on (provider, providerUserId).
 
 // On the site's callback:
-const claims = await verifyRelay(env.RELAY_SECRET, relayToken); // {email,provider,nonce} | null
+const claims = await verifyRelay(env.RELAY_SECRET, relayToken); // {email,provider,nonce,providerUserId?} | null
 if (!claims || claims.nonce !== expectedNonce) return forbidden();
 ```
 

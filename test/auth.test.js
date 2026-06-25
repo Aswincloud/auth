@@ -318,6 +318,24 @@ test("signRelay / verifyRelay round-trips claims", async () => {
   assert.deepEqual(claims, { email: "u@x.com", provider: "google", nonce: "n1" });
 });
 
+test("relay carries providerUserId when present, omits it otherwise", async () => {
+  // Present: round-trips and is returned.
+  const withId = await signRelay("s", { email: "u@x.com", provider: "github", nonce: "n", providerUserId: "12345" });
+  assert.deepEqual(await verifyRelay("s", withId), {
+    email: "u@x.com",
+    provider: "github",
+    nonce: "n",
+    providerUserId: "12345",
+  });
+  // Absent: claims have no providerUserId key (back-compat with single-key sites).
+  const without = await signRelay("s", { email: "u@x.com", provider: "google", nonce: "n" });
+  const claims = await verifyRelay("s", without);
+  assert.equal("providerUserId" in claims, false);
+  // Empty string is treated as absent (not packed).
+  const empty = await signRelay("s", { email: "u@x.com", provider: "google", nonce: "n", providerUserId: "" });
+  assert.equal("providerUserId" in (await verifyRelay("s", empty)), false);
+});
+
 test("verifyRelay rejects wrong secret, tamper, expiry, malformed", async () => {
   const tok = await signRelay("site-a-secret", { email: "u@x.com", provider: "github", nonce: "n" });
   assert.equal(await verifyRelay("site-b-secret", tok), null); // different site's secret
