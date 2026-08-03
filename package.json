@@ -49,10 +49,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260623.1",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "typescript": "^5.7.0"
   },
   "engines": {
