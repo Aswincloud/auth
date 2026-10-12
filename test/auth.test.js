@@ -64,6 +64,7 @@ test("password hash verifies and rejects", async () => {
 test("verifyPassword rejects malformed stored hash", async () => {
   assert.ok(!(await verifyPassword("x", "not-a-hash")));
   assert.ok(!(await verifyPassword("x", "pbkdf2$5$a$b"))); // iterations too low
+  assert.ok(!(await verifyPassword("x", "pbkdf2$100000$%%%$%%%"))); // malformed base64
 });
 
 // ---------------------------------------------------------------- tokens
