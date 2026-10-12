@@ -215,12 +215,13 @@ test("removeUser: last-admin guard + confirm phrase + password", async () => {
   await createUser(db, { id: "admin", email: "a@x.com", passwordHash: await hashPassword("adminpw1"), isAdmin: true });
 
   // last admin protected
-  assert.equal((await removeUser(db, { userId: "admin", currentPassword: "adminpw1" })).error, "last_admin");
+  assert.equal((await removeUser(db, { userId: "admin", currentPassword: "adminpw1", confirmPhrase: "delete my account" })).error, "last_admin");
 
   // a normal user with wrong confirm phrase
   await createUser(db, { id: "u1", email: "u@x.com", passwordHash: await hashPassword("userpw12") });
   assert.equal((await removeUser(db, { userId: "u1", currentPassword: "userpw12", confirmPhrase: "nope" })).error, "confirm_required");
-  assert.equal((await removeUser(db, { userId: "u1", currentPassword: "wrong" })).error, "invalid_credentials");
+  assert.equal((await removeUser(db, { userId: "u1", currentPassword: "userpw12" })).error, "confirm_required");
+  assert.equal((await removeUser(db, { userId: "u1", currentPassword: "wrong", confirmPhrase: "delete my account" })).error, "invalid_credentials");
 
   const ok = await removeUser(db, { userId: "u1", currentPassword: "userpw12", confirmPhrase: "delete my account" });
   assert.deepEqual(ok, { ok: true, status: "deleted" });
