@@ -42,10 +42,14 @@ export async function hashPassword(plain: string): Promise<string> {
 export async function verifyPassword(plain: string, stored: string): Promise<boolean> {
   const parts = stored.split("$");
   if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
-  const iterations = Number(parts[1]);
-  if (!Number.isInteger(iterations) || iterations < 1000) return false;
-  const salt = b64urlDecode(parts[2] as string);
-  const expected = b64urlDecode(parts[3] as string);
-  const actual = await derive(plain, salt, iterations);
-  return constantTimeEqual(expected, actual);
+  try {
+    const iterations = Number(parts[1]);
+    if (!Number.isInteger(iterations) || iterations < 1000) return false;
+    const salt = b64urlDecode(parts[2] as string);
+    const expected = b64urlDecode(parts[3] as string);
+    const actual = await derive(plain, salt, iterations);
+    return constantTimeEqual(expected, actual);
+  } catch {
+    return false;
+  }
 }

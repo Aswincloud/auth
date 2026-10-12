@@ -56,7 +56,9 @@ export async function signup(
   if (existing) {
     // Don't leak whether the account exists; just refresh the (unverified) hash
     // and re-send a code. A verified account simply re-receives a code it won't need.
-    await updateUserPasswordHash(db, existing.id, hash);
+    if (existing.email_verified === 0) {
+      await updateUserPasswordHash(db, existing.id, hash);
+    }
   } else {
     const id = (args.newUserId ?? newUlid)();
     await createUser(db, { id, email, passwordHash: hash });
@@ -249,7 +251,7 @@ export async function removeUser(
   if (!user) return { ok: false, error: "not_found" };
 
   // Require an explicit confirm phrase as a deliberate guard.
-  if (args.confirmPhrase !== undefined && args.confirmPhrase.trim().toLowerCase() !== "delete my account") {
+  if (args.confirmPhrase?.trim().toLowerCase() !== "delete my account") {
     return { ok: false, error: "confirm_required" };
   }
 
