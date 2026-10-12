@@ -100,6 +100,29 @@ test("signup rejects bad email + weak password", async () => {
   assert.equal((await signup(db, { email: "a@b.com", password: "short", secret: SECRET, sendEmail })).error, "weak_password");
 });
 
+test("signup does not overwrite a verified account password", async () => {
+  const db = makeFakeDb();
+  const { sendEmail } = collector();
+  const originalHash = await hashPassword("originalpw");
+  await createUser(db, {
+    id: "verified",
+    email: "verified@x.com",
+    passwordHash: originalHash,
+    emailVerified: true,
+  });
+
+  assert.deepEqual(
+    await signup(db, {
+      email: "verified@x.com",
+      password: "attackerpw",
+      secret: SECRET,
+      sendEmail,
+    }),
+    { ok: true, status: "pending_verification" },
+  );
+  assert.equal((await getUserById(db, "verified")).password_hash, originalHash);
+});
+
 test("verifyOtp: too_many_attempts after max", async () => {
   const db = makeFakeDb();
   const { sendEmail } = collector();
