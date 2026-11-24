@@ -33,6 +33,14 @@ export interface RelayClaims {
    * before this field existed.
    */
   providerUserId?: string;
+  /**
+   * Whether the provider verified `email`. Defaults to true, so relays from
+   * before this field existed (and every verified relay) read as verified.
+   * False only for a site that asked the broker to forward unverified
+   * identities: such an email must never be used to link to an existing
+   * account — see OAuthConfig.requireVerifiedEmail.
+   */
+  emailVerified?: boolean;
 }
 
 /**
@@ -44,7 +52,7 @@ export function signRelay(
   claims: RelayClaims,
   ttlSeconds: number = DEFAULT_TTL_SECONDS,
 ): Promise<string> {
-  const payload: { e: string; p: string; n: string; u?: string } = {
+  const payload: { e: string; p: string; n: string; u?: string; v?: false } = {
     e: claims.email,
     p: claims.provider,
     n: claims.nonce,
@@ -52,6 +60,9 @@ export function signRelay(
   // Include the provider user id only when given, so single-key sites (status)
   // produce the same token shape as before this field existed.
   if (claims.providerUserId) payload.u = claims.providerUserId;
+  // Only an unverified email is marked, so verified relays stay byte-identical
+  // to before and old sites that don't read `v` keep working unchanged.
+  if (claims.emailVerified === false) payload.v = false;
   return signToken(relaySecret, JSON.stringify(payload), RELAY_PURPOSE, ttlSeconds);
 }
 
@@ -64,10 +75,10 @@ export async function verifyRelay(relaySecret: string, token: string): Promise<R
   const subject = await verifyToken(relaySecret, token, RELAY_PURPOSE);
   if (!subject) return null;
   try {
-    const o = JSON.parse(subject) as { e?: unknown; p?: unknown; n?: unknown; u?: unknown };
+    const o = JSON.parse(subject) as { e?: unknown; p?: unknown; n?: unknown; u?: unknown; v?: unknown };
     if (typeof o.e !== "string" || typeof o.p !== "string" || typeof o.n !== "string") return null;
     if (!o.e || !o.p) return null;
-    const claims: RelayClaims = { email: o.e, provider: o.p, nonce: o.n };
+    const claims: RelayClaims = { email: o.e, provider: o.p, nonce: o.n, emailVerified: o.v !== false };
     if (typeof o.u === "string" && o.u) claims.providerUserId = o.u; // optional
     return claims;
   } catch {

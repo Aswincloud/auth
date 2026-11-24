@@ -23,6 +23,7 @@ import {
   constantTimeEqual,
   b64urlEncode,
   b64urlDecode,
+  b64urlEncodeString,
   emailAllowed,
   parseDomains,
   parseAccessMode,
@@ -315,7 +316,7 @@ test("emailAllowed: domain mode allows in-domain + explicit owners, rejects othe
 test("signRelay / verifyRelay round-trips claims", async () => {
   const tok = await signRelay("site-secret", { email: "u@x.com", provider: "google", nonce: "n1" });
   const claims = await verifyRelay("site-secret", tok);
-  assert.deepEqual(claims, { email: "u@x.com", provider: "google", nonce: "n1" });
+  assert.deepEqual(claims, { email: "u@x.com", provider: "google", nonce: "n1", emailVerified: true });
 });
 
 test("relay carries providerUserId when present, omits it otherwise", async () => {
@@ -326,6 +327,7 @@ test("relay carries providerUserId when present, omits it otherwise", async () =
     provider: "github",
     nonce: "n",
     providerUserId: "12345",
+    emailVerified: true,
   });
   // Absent: claims have no providerUserId key (back-compat with single-key sites).
   const without = await signRelay("s", { email: "u@x.com", provider: "google", nonce: "n" });
@@ -349,4 +351,103 @@ test("verifyRelay rejects a token signed for a different purpose", async () => {
   // A session token must not pass as a relay (purpose binding).
   const sess = await signToken("site-secret", "u@x.com", "session", 3600);
   assert.equal(await verifyRelay("site-secret", sess), null);
+});
+
+// ---------------------------------------------------------------- oauth: Microsoft email verification
+// Graph's mail / userPrincipalName are free text any tenant admin can set, so a
+// Microsoft email is verified only by the ID token's xms_edov claim ("nOAuth").
+
+const TID = "11111111-2222-3333-4444-555555555555";
+const unsignedJwt = (claims) =>
+  `${b64urlEncodeString(JSON.stringify({ alg: "RS256", typ: "JWT" }))}.${b64urlEncodeString(JSON.stringify(claims))}.sig`;
+const msClaims = (over = {}) => ({
+  aud: "ms-id",
+  iss: `https://login.microsoftonline.com/${TID}/v2.0`,
+  tid: TID,
+  exp: Math.floor(Date.now() / 1000) + 3600,
+  email: "real@example.com",
+  xms_edov: true,
+  ...over,
+});
+
+// Drive handleOAuthCallback for Microsoft with a valid signed state, stubbing
+// the token endpoint (returning `idToken`) and Graph /me (returning `graph`).
+async function microsoftCallback({ idToken, graph = { id: "graph-oid", mail: "admin-typed@victim.com" }, cfg = OAUTH }) {
+  const state = await signToken(cfg.stateSecret, "nonce-1", "oauth_state", 600);
+  const req = new Request(`https://site.com/cb?code=abc&state=${encodeURIComponent(state)}`, {
+    headers: { cookie: `oauth_state=${state}` },
+  });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("/oauth2/v2.0/token")) {
+      return Response.json({ access_token: "at", ...(idToken ? { id_token: idToken } : {}) });
+    }
+    if (u.startsWith("https://graph.microsoft.com/v1.0/me")) return Response.json(graph);
+    throw new Error(`unexpected fetch ${u}`);
+  };
+  try {
+    return await handleOAuthCallback(cfg, "microsoft", req);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+const ACCEPT_UNVERIFIED = { ...OAUTH, requireVerifiedEmail: false };
+
+test("microsoft: xms_edov=true verifies, using the ID token's email", async () => {
+  const r = await microsoftCallback({ idToken: unsignedJwt(msClaims()) });
+  assert.equal(r.ok, true);
+  assert.equal(r.user.email, "real@example.com", "the address xms_edov vouches for, not Graph mail");
+  assert.equal(r.user.emailVerified, true);
+  assert.equal(r.user.providerUserId, "graph-oid", "stable id unchanged so existing links still match");
+});
+
+test("microsoft: an admin-set Graph email without xms_edov is NOT verified (nOAuth)", async () => {
+  // Default config rejects it outright.
+  for (const idToken of [unsignedJwt(msClaims({ xms_edov: false })), unsignedJwt(msClaims({ xms_edov: undefined })), undefined]) {
+    const r = await microsoftCallback({ idToken });
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "email_not_verified");
+  }
+});
+
+test("microsoft: requireVerifiedEmail:false passes an unverified identity through, marked unverified", async () => {
+  const r = await microsoftCallback({ idToken: unsignedJwt(msClaims({ xms_edov: false })), cfg: ACCEPT_UNVERIFIED });
+  assert.equal(r.ok, true);
+  assert.equal(r.user.emailVerified, false);
+  assert.equal(r.user.email, "admin-typed@victim.com");
+});
+
+test("microsoft: xms_edov sent as the string \"true\" also verifies", async () => {
+  const r = await microsoftCallback({ idToken: unsignedJwt(msClaims({ xms_edov: "true" })) });
+  assert.equal(r.ok, true);
+  assert.equal(r.user.emailVerified, true);
+});
+
+test("microsoft: an ID token for another app, expired, or from a mismatched issuer is refused", async () => {
+  const bad = [
+    msClaims({ aud: "someone-elses-app" }),
+    msClaims({ exp: Math.floor(Date.now() / 1000) - 10 }),
+    msClaims({ iss: "https://login.microsoftonline.com/other-tenant/v2.0" }),
+    msClaims({ tid: undefined }),
+  ];
+  for (const c of bad) {
+    const r = await microsoftCallback({ idToken: unsignedJwt(c), cfg: ACCEPT_UNVERIFIED });
+    assert.equal(r.ok, false, JSON.stringify(c));
+    assert.equal(r.error, "userinfo_failed");
+  }
+  const notJwt = await microsoftCallback({ idToken: "not-a-jwt", cfg: ACCEPT_UNVERIFIED });
+  assert.equal(notJwt.error, "userinfo_failed");
+});
+
+test("relay: emailVerified:false round-trips; verified relays are byte-identical to before", async () => {
+  const unverified = await signRelay("s", { email: "u@x.com", provider: "microsoft", nonce: "n", emailVerified: false });
+  assert.equal((await verifyRelay("s", unverified)).emailVerified, false);
+  // A verified relay carries no extra field, so old sites see the same token shape.
+  const a = await signRelay("s", { email: "u@x.com", provider: "google", nonce: "n" });
+  const b = await signRelay("s", { email: "u@x.com", provider: "google", nonce: "n", emailVerified: true });
+  const payloadOf = async (t) => JSON.parse(await verifyToken("s", t, "relay"));
+  assert.deepEqual(await payloadOf(a), await payloadOf(b));
+  assert.equal("v" in (await payloadOf(b)), false);
+  assert.equal((await verifyRelay("s", a)).emailVerified, true, "old-format relays read as verified");
 });
