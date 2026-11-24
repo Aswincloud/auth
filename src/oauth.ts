@@ -19,6 +19,7 @@
 
 import { signToken, verifyToken } from "./tokens.js";
 import { serializeCookie, readCookie } from "./cookies.js";
+import { b64urlDecodeString } from "./encoding.js";
 
 export type ProviderId = "google" | "github" | "microsoft";
 
@@ -50,6 +51,15 @@ export interface OAuthConfig {
   redirectUri: (provider: ProviderId) => string;
   /** State cookie name. Default "oauth_state". */
   stateCookieName?: string;
+  /**
+   * Reject identities whose email the provider hasn't verified (default true).
+   * Set false to receive them with `emailVerified: false` and decide yourself —
+   * e.g. sign them in as a separate account that is never linked to an
+   * existing user by email. Never link an unverified email to an existing
+   * account: for Microsoft that email is a free-text field any tenant admin
+   * can set to anyone's address.
+   */
+  requireVerifiedEmail?: boolean;
 }
 
 const STATE_PURPOSE = "oauth_state";
@@ -134,7 +144,13 @@ function tokenUrl(cfg: OAuthConfig, provider: ProviderId): string {
   }
 }
 
-async function exchangeCode(cfg: OAuthConfig, provider: ProviderId, code: string): Promise<string> {
+interface TokenResponse {
+  accessToken: string;
+  /** OIDC ID token, when the provider returns one (Google, Microsoft). */
+  idToken?: string;
+}
+
+async function exchangeCode(cfg: OAuthConfig, provider: ProviderId, code: string): Promise<TokenResponse> {
   const client = clientFor(cfg, provider);
   if (!client) throw new Error(`provider not configured: ${provider}`);
 
@@ -158,16 +174,59 @@ async function exchangeCode(cfg: OAuthConfig, provider: ProviderId, code: string
     const txt = await res.text().catch(() => "");
     throw new Error(`token exchange ${res.status} ${txt.slice(0, 200)}`);
   }
-  const json = (await res.json()) as { access_token?: string; error?: string };
+  const json = (await res.json()) as { access_token?: string; id_token?: string; error?: string };
   if (!json.access_token) {
     throw new Error(`token exchange: no access_token (${json.error ?? "unknown"})`);
   }
-  return json.access_token;
+  return { accessToken: json.access_token, idToken: json.id_token };
+}
+
+// ---- Microsoft ID token ----------------------------------------------------
+
+interface MicrosoftIdClaims {
+  aud?: string;
+  iss?: string;
+  tid?: string;
+  exp?: number;
+  email?: string;
+  xms_edov?: boolean | string;
+}
+
+/**
+ * Read the claims from a Microsoft ID token.
+ *
+ * The signature is not checked: the token came straight from Microsoft's token
+ * endpoint over TLS in the back-channel code exchange, which OIDC Core §3.1.3.7
+ * accepts in place of signature validation. The audience, expiry and issuer
+ * are still checked so a token minted for another app can't be replayed here.
+ * Throws on anything malformed or mismatched (the caller maps it to
+ * "userinfo_failed").
+ */
+function readMicrosoftIdToken(idToken: string, clientId: string): MicrosoftIdClaims {
+  const [, payload, , extra] = idToken.split(".");
+  if (!payload || extra !== undefined) throw new Error("Microsoft id_token is not a JWT");
+  let claims: MicrosoftIdClaims;
+  try {
+    claims = JSON.parse(b64urlDecodeString(payload)) as MicrosoftIdClaims;
+  } catch {
+    throw new Error("Microsoft id_token payload is unreadable");
+  }
+  if (claims.aud !== clientId) throw new Error("Microsoft id_token audience mismatch");
+  if (typeof claims.exp !== "number" || claims.exp * 1000 <= Date.now()) {
+    throw new Error("Microsoft id_token expired");
+  }
+  // With tenant "common" the issuer varies per tenant, but it must name the
+  // same tenant as the token's own tid claim.
+  if (!claims.tid || claims.iss !== `https://login.microsoftonline.com/${claims.tid}/v2.0`) {
+    throw new Error("Microsoft id_token issuer mismatch");
+  }
+  return claims;
 }
 
 // ---- userinfo (per provider) ----------------------------------------------
 
-async function fetchUser(provider: ProviderId, accessToken: string): Promise<OAuthUser> {
+async function fetchUser(cfg: OAuthConfig, provider: ProviderId, tokens: TokenResponse): Promise<OAuthUser> {
+  const { accessToken } = tokens;
   switch (provider) {
     case "google": {
       const r = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
@@ -175,7 +234,8 @@ async function fetchUser(provider: ProviderId, accessToken: string): Promise<OAu
       });
       if (!r.ok) throw new Error(`Google userinfo ${r.status}`);
       const j = (await r.json()) as { sub: string; email: string; email_verified?: boolean };
-      return { providerUserId: j.sub, email: j.email, emailVerified: j.email_verified !== false };
+      // Only an explicit true counts; a missing claim is not a verification.
+      return { providerUserId: j.sub, email: j.email, emailVerified: j.email_verified === true };
     }
     case "github": {
       const headers = {
@@ -212,10 +272,26 @@ async function fetchUser(provider: ProviderId, accessToken: string): Promise<OAu
       });
       if (!r.ok) throw new Error(`Microsoft Graph /me ${r.status}`);
       const j = (await r.json()) as { id: string; mail?: string; userPrincipalName?: string };
+
+      // Graph's mail / userPrincipalName are free text that any tenant admin can
+      // set to anyone's address, so on their own they prove nothing ("nOAuth").
+      // Microsoft's signal is the xms_edov ID-token claim: true only when the
+      // tenant has verified it owns the email's domain (personal Microsoft
+      // accounts included). It is an optional claim — the app registration must
+      // add `email` and `xms_edov` to the ID token, or every Microsoft login is
+      // treated as unverified. When verified, use the ID token's email: that is
+      // the address xms_edov vouches for.
+      let verifiedEmail = "";
+      if (tokens.idToken) {
+        const claims = readMicrosoftIdToken(tokens.idToken, cfg.clients.microsoft?.clientId ?? "");
+        const edov = claims.xms_edov === true || claims.xms_edov === "true";
+        if (edov && claims.email) verifiedEmail = claims.email;
+      }
+      if (verifiedEmail) return { providerUserId: j.id, email: verifiedEmail, emailVerified: true };
+
       const email = j.mail ?? j.userPrincipalName ?? "";
       if (!email) throw new Error("Microsoft returned no email");
-      // Entra-tenant users are always verified by Microsoft.
-      return { providerUserId: j.id, email, emailVerified: true };
+      return { providerUserId: j.id, email, emailVerified: false };
     }
   }
 }
@@ -287,21 +363,23 @@ export async function handleOAuthCallback(
   const stateValid = (await verifyToken(cfg.stateSecret, stateParam, STATE_PURPOSE)) !== null;
   if (!stateValid) return { ok: false, error: "bad_state" };
 
-  let accessToken: string;
+  let tokens: TokenResponse;
   try {
-    accessToken = await exchangeCode(cfg, provider, code);
+    tokens = await exchangeCode(cfg, provider, code);
   } catch {
     return { ok: false, error: "token_exchange_failed" };
   }
 
   let user: OAuthUser;
   try {
-    user = await fetchUser(provider, accessToken);
+    user = await fetchUser(cfg, provider, tokens);
   } catch {
     return { ok: false, error: "userinfo_failed" };
   }
 
-  if (!user.emailVerified) return { ok: false, error: "email_not_verified" };
+  if (!user.emailVerified && cfg.requireVerifiedEmail !== false) {
+    return { ok: false, error: "email_not_verified" };
+  }
   user.email = user.email.toLowerCase();
   return { ok: true, user };
 }
