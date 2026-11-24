@@ -33,6 +33,8 @@ export interface OtpRow {
   expires_at: number; // epoch seconds
   attempts: number;
   created_at: number; // epoch seconds
+  /** Password chosen at a re-signup, applied only once the code is verified. */
+  pending_password_hash?: string | null;
 }
 
 /**

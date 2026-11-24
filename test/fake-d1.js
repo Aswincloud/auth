@@ -6,6 +6,7 @@ export function makeFakeDb() {
   const users = new Map(); // id -> row
   const otps = new Map(); // email -> row
   const oauth = new Map(); // `${provider}:${puid}` -> { user_id, email }
+  let alteredOtp = false;
 
   const byEmail = (email) => {
     const e = String(email).toLowerCase();
@@ -78,10 +79,25 @@ export function makeFakeDb() {
     }
 
     // ---- otp_codes ----
-    if (q.startsWith("INSERT INTO otp_codes")) {
-      const [email, code_hash, expires_at, created_at] = args;
-      otps.set(String(email).toLowerCase(), { email, code_hash, expires_at, attempts: 0, created_at });
+    if (q.startsWith("ALTER TABLE otp_codes ADD COLUMN pending_password_hash")) {
+      // Real D1 throws "duplicate column" on re-run; first call succeeds.
+      if (alteredOtp) throw new Error("duplicate column name: pending_password_hash");
+      alteredOtp = true;
       return {};
+    }
+    if (q.startsWith("INSERT INTO otp_codes")) {
+      const [email, code_hash, expires_at, created_at, pending_password_hash, now] = args;
+      const key = String(email).toLowerCase();
+      const prev = otps.get(key);
+      // Mirrors the ON CONFLICT: keep attempts while the previous code is live.
+      const attempts = prev && prev.expires_at > now ? prev.attempts : 0;
+      otps.set(key, { email, code_hash, expires_at, attempts, created_at, pending_password_hash: pending_password_hash ?? null });
+      return {};
+    }
+    if (q.includes("UPDATE otp_codes SET attempts = attempts + 1 WHERE email = ? AND attempts < ?")) {
+      const o = otps.get(String(args[0]).toLowerCase());
+      if (o && o.attempts < args[1]) { o.attempts++; return { changes: 1 }; }
+      return { changes: 0 };
     }
     if (q.startsWith("SELECT * FROM otp_codes WHERE email")) return { first: otps.get(String(args[0]).toLowerCase()) ?? null };
     if (q.includes("UPDATE otp_codes SET attempts = attempts + 1")) {
@@ -99,7 +115,7 @@ export function makeFakeDb() {
       bind: (...a) => { bound = a; return stmt; },
       first: async () => run(sql, bound).first ?? null,
       all: async () => ({ results: run(sql, bound).all ?? [] }),
-      run: async () => { run(sql, bound); return { success: true }; },
+      run: async () => { const r = run(sql, bound); return { success: true, meta: { changes: r.changes ?? 1 } }; },
     };
     return stmt;
   }

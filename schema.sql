@@ -42,5 +42,9 @@ CREATE TABLE IF NOT EXISTS otp_codes (
   code_hash  TEXT NOT NULL,                              -- sha256(code|pepper)
   expires_at INTEGER NOT NULL,                           -- epoch ms
   attempts   INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  pending_password_hash TEXT                             -- set at re-signup, applied on verify
 );
+
+-- Existing DBs created before 0.6.0 (no pending_password_hash): run once —
+--   ALTER TABLE otp_codes ADD COLUMN pending_password_hash TEXT;

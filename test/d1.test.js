@@ -32,6 +32,8 @@ import {
   accountDeletedEmail,
   OAUTH_ONLY_HASH,
   hasRealPassword,
+  securityStamp,
+  verifyPasswordOrDummy,
 } from "../dist/d1/index.js";
 import { hashPassword } from "../dist/index.js";
 import {
@@ -263,4 +265,127 @@ test("auth pages render and contain no next/* import in output", async () => {
   for (const f of ["ForgotPasswordPage", "ResetPasswordPage", "VerifyEmailPage"]) {
     assert.ok(!/from\s+["']next/.test(readFileSync(`./dist/react/${f}.js`, "utf8")), `${f} leaked next/*`);
   }
+});
+
+// ---------------------------------------------------------------- 0.6.0 security fixes
+// Each test is the attacker's move; it must fail.
+
+const codeFrom = (mail) => mail.text.match(/\b\d{6}\b/)[0];
+const tokenFrom = (mail) => new URL(mail.text.match(/https?:\S+/)[0]).searchParams.get("token");
+const passwordOf = async (db, id) => (await getUserById(db, id)).password_hash;
+
+test("signup on an existing unverified account does NOT replace its password", async () => {
+  const { verifyPassword } = await import("../dist/index.js");
+  const db = makeFakeDb();
+  const c = collector();
+  // The real owner signs up but hasn't verified yet.
+  await signup(db, { email: "v@x.com", password: "ownerpass1", secret: SECRET, sendEmail: c.sendEmail, newUserId: () => "uv" });
+  const ownerHash = await passwordOf(db, "uv");
+  // Expire the owner's code so the attacker's re-signup isn't held by the cooldown.
+  db._otps.get("v@x.com").created_at -= 3600;
+  // Attacker re-signs up with the victim's email and their own password.
+  await signup(db, { email: "v@x.com", password: "attacker1", secret: SECRET, sendEmail: c.sendEmail });
+  assert.equal(await passwordOf(db, "uv"), ownerHash, "password untouched until the code is verified");
+  assert.equal(await verifyPassword("attacker1", await passwordOf(db, "uv")), false);
+});
+
+test("a re-signup password applies only after the inbox owner verifies the code", async () => {
+  const { verifyPassword } = await import("../dist/index.js");
+  const db = makeFakeDb();
+  const c = collector();
+  await signup(db, { email: "w@x.com", password: "firstpass", secret: SECRET, sendEmail: c.sendEmail, newUserId: () => "uw" });
+  db._otps.get("w@x.com").created_at -= 3600;
+  await signup(db, { email: "w@x.com", password: "secondpass", secret: SECRET, sendEmail: c.sendEmail });
+  const r = await verifyOtp(db, { email: "w@x.com", code: codeFrom(c.sent.at(-1)), secret: SECRET });
+  assert.equal(r.ok, true);
+  assert.ok(await verifyPassword("secondpass", await passwordOf(db, "uw")), "pending password applied on verify");
+});
+
+test("signup on a VERIFIED account never changes its password", async () => {
+  const db = makeFakeDb();
+  await createUser(db, { id: "uq", email: "q@x.com", passwordHash: await hashPassword("realpass1") });
+  await (await import("../dist/d1/index.js")).markEmailVerified(db, "uq");
+  const before = await passwordOf(db, "uq");
+  await signup(db, { email: "q@x.com", password: "attacker1", secret: SECRET, sendEmail: collector().sendEmail });
+  assert.equal(await passwordOf(db, "uq"), before);
+});
+
+test("signup re-sends are rate-limited by the resend cooldown (no inbox flood)", async () => {
+  const db = makeFakeDb();
+  const c = collector();
+  await signup(db, { email: "f@x.com", password: "password1", secret: SECRET, sendEmail: c.sendEmail, newUserId: () => "uf" });
+  for (let i = 0; i < 5; i++) await signup(db, { email: "f@x.com", password: "password1", secret: SECRET, sendEmail: c.sendEmail });
+  assert.equal(c.sent.length, 1, "repeat signups within the cooldown send nothing");
+});
+
+test("re-issuing a code does NOT reset the guess budget", async () => {
+  const db = makeFakeDb();
+  const c = collector();
+  await signup(db, { email: "b@x.com", password: "password1", secret: SECRET, sendEmail: c.sendEmail, newUserId: () => "ub" });
+  for (let i = 0; i < 5; i++) await verifyOtp(db, { email: "b@x.com", code: "000000", secret: SECRET });
+  // Attacker asks for a fresh code (bypassing the cooldown) hoping for 5 more guesses.
+  db._otps.get("b@x.com").created_at -= 3600;
+  await resendOtp(db, { email: "b@x.com", secret: SECRET, sendEmail: c.sendEmail, cooldownSeconds: 0 });
+  const r = await verifyOtp(db, { email: "b@x.com", code: codeFrom(c.sent.at(-1)), secret: SECRET });
+  assert.equal(r.error, "too_many_attempts", "even the right code is refused once the budget is spent");
+});
+
+test("parallel guesses can't exceed the attempt cap", async () => {
+  const db = makeFakeDb();
+  const c = collector();
+  await signup(db, { email: "p@x.com", password: "password1", secret: SECRET, sendEmail: c.sendEmail, newUserId: () => "up" });
+  const results = await Promise.all(Array.from({ length: 20 }, () => verifyOtp(db, { email: "p@x.com", code: "000000", secret: SECRET })));
+  assert.equal(results.filter((r) => r.error === "invalid_code").length, 5, "only 5 guesses are actually checked");
+  assert.equal(db._otps.get("p@x.com").attempts, 5);
+});
+
+test("verifyOtp gives one error for unknown account, no code and wrong code", async () => {
+  const db = makeFakeDb();
+  assert.equal((await verifyOtp(db, { email: "nobody@x.com", code: "123456", secret: SECRET })).error, "invalid_code");
+});
+
+test("a password-reset link works once, then dies (stamp changed)", async () => {
+  const db = makeFakeDb();
+  await createUser(db, { id: "u1", email: "a@x.com", passwordHash: await hashPassword("oldpassw") });
+  const c = collector();
+  await requestPasswordReset(db, { email: "a@x.com", secret: SECRET, sendEmail: c.sendEmail, appUrl: "https://s.com" });
+  const token = tokenFrom(c.sent[0]);
+  assert.equal((await resetPassword(db, { token, newPassword: "newpassw1", secret: SECRET })).ok, true);
+  // Replaying the same (leaked) link must fail now.
+  assert.equal((await resetPassword(db, { token, newPassword: "attacker1", secret: SECRET })).error, "invalid_token");
+});
+
+test("a reset link dies if the password was changed another way first", async () => {
+  const db = makeFakeDb();
+  await createUser(db, { id: "u1", email: "a@x.com", passwordHash: await hashPassword("oldpassw") });
+  const c = collector();
+  await requestPasswordReset(db, { email: "a@x.com", secret: SECRET, sendEmail: c.sendEmail, appUrl: "https://s.com" });
+  await changePassword(db, { userId: "u1", currentPassword: "oldpassw", newPassword: "changed123" });
+  assert.equal((await resetPassword(db, { token: tokenFrom(c.sent[0]), newPassword: "attacker1", secret: SECRET })).error, "invalid_token");
+});
+
+test("an email-change link dies if the password changed after it was sent", async () => {
+  const db = makeFakeDb();
+  await createUser(db, { id: "u1", email: "old@x.com", passwordHash: await hashPassword("oldpassw") });
+  const c = collector();
+  await requestEmailChange(db, { userId: "u1", newEmail: "new@x.com", secret: SECRET, sendEmail: c.sendEmail, appUrl: "https://s.com" });
+  await changePassword(db, { userId: "u1", currentPassword: "oldpassw", newPassword: "changed123" });
+  assert.equal((await confirmEmailChange(db, { token: tokenFrom(c.sent[0]), secret: SECRET })).error, "invalid_token");
+  assert.equal((await getUserById(db, "u1")).email, "old@x.com");
+});
+
+test("an OAuth-only account can't be deleted without the confirm phrase", async () => {
+  const db = makeFakeDb();
+  await createUser(db, { id: "uo", email: "o@x.com", passwordHash: OAUTH_ONLY_HASH });
+  assert.equal((await removeUser(db, { userId: "uo" })).error, "confirm_required", "omitting confirm no longer skips the check");
+  assert.equal((await removeUser(db, { userId: "uo", confirmPhrase: "delete my account" })).ok, true);
+});
+
+test("securityStamp changes with the password; verifyPasswordOrDummy is false for a missing user", async () => {
+  const a = await securityStamp({ password_hash: "pbkdf2$1$a$b" });
+  const b = await securityStamp({ password_hash: "pbkdf2$1$a$c" });
+  assert.match(a, /^[0-9a-f]{16}$/);
+  assert.notEqual(a, b);
+  assert.equal(await verifyPasswordOrDummy("anything", null), false);
+  assert.equal(await verifyPasswordOrDummy("rightpass", await hashPassword("rightpass")), true);
 });

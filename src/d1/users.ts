@@ -138,14 +138,52 @@ export async function linkOAuthIdentity(
 
 // ---- otp codes -------------------------------------------------------------
 
-export async function upsertOtp(db: D1Database, email: string, codeHash: string, expiresAt: number): Promise<void> {
+/**
+ * Issue (or re-issue) the code for an email.
+ *
+ * Re-issuing keeps the failed-attempt count while the previous code is still
+ * live, so sending a fresh code can't be used to reset the guess budget and
+ * brute-force a 6-digit code. Once the previous code has expired the count
+ * starts again from zero.
+ *
+ * `pendingPasswordHash` is the password chosen at signup, applied only when the
+ * code is verified (see flows.signup). Pass null to leave none pending.
+ */
+// Databases created before 0.6.0 lack otp_codes.pending_password_hash. Add it the
+// first time it's needed in this isolate, so a site upgrading the package
+// doesn't have to run a migration first. "duplicate column" means it exists.
+let otpColumnsEnsured = false;
+async function ensureOtpColumns(db: D1Database): Promise<void> {
+  if (otpColumnsEnsured) return;
+  try {
+    await db.prepare(`ALTER TABLE otp_codes ADD COLUMN pending_password_hash TEXT`).run();
+  } catch (e) {
+    if (!/duplicate column/i.test(String((e as Error)?.message ?? e))) throw e;
+  }
+  otpColumnsEnsured = true;
+}
+
+export async function upsertOtp(
+  db: D1Database,
+  email: string,
+  codeHash: string,
+  expiresAt: number,
+  pendingPasswordHash: string | null = null,
+): Promise<void> {
+  await ensureOtpColumns(db);
+  const now = nowSec();
   await db
     .prepare(
-      `INSERT INTO otp_codes (email, code_hash, expires_at, attempts, created_at)
-       VALUES (?, ?, ?, 0, ?)
-       ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0, created_at = excluded.created_at`,
+      `INSERT INTO otp_codes (email, code_hash, expires_at, attempts, created_at, pending_password_hash)
+       VALUES (?, ?, ?, 0, ?, ?)
+       ON CONFLICT(email) DO UPDATE SET
+         code_hash = excluded.code_hash,
+         attempts = CASE WHEN otp_codes.expires_at > ? THEN otp_codes.attempts ELSE 0 END,
+         expires_at = excluded.expires_at,
+         created_at = excluded.created_at,
+         pending_password_hash = excluded.pending_password_hash`,
     )
-    .bind(email, codeHash, expiresAt, nowSec())
+    .bind(email, codeHash, expiresAt, now, pendingPasswordHash, now)
     .run();
 }
 
@@ -156,6 +194,20 @@ export async function getOtp(db: D1Database, email: string): Promise<OtpRow | nu
 
 export async function incrementOtpAttempts(db: D1Database, email: string): Promise<void> {
   await db.prepare(`UPDATE otp_codes SET attempts = attempts + 1 WHERE email = ?`).bind(email).run();
+}
+
+/**
+ * Atomically spend one guess. Returns true if a guess was available (and is now
+ * used up), false if the cap is already reached. Doing the increment BEFORE
+ * comparing the code means parallel guesses can't all slip through the
+ * check-then-increment race.
+ */
+export async function claimOtpAttempt(db: D1Database, email: string, maxAttempts: number): Promise<boolean> {
+  const res = await db
+    .prepare(`UPDATE otp_codes SET attempts = attempts + 1 WHERE email = ? AND attempts < ?`)
+    .bind(email, maxAttempts)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
 }
 
 export async function deleteOtp(db: D1Database, email: string): Promise<void> {
