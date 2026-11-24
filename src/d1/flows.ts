@@ -19,9 +19,10 @@ import {
   countAdmins,
   upsertOtp,
   getOtp,
-  incrementOtpAttempts,
+  claimOtpAttempt,
   deleteOtp,
 } from "./users.js";
+import { securityStamp } from "./stamp.js";
 import { generateOtp, hashOtp, otpHashEquals, OTP_TTL_SECONDS, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_SECONDS } from "./otp.js";
 import { OAUTH_ONLY_HASH, hasRealPassword, type D1Database, type EmailSender } from "./types.js";
 import { passwordResetEmail, verifyEmail as verifyEmailTpl, otpEmail, emailChangeEmail, type EmailTemplate } from "./email.js";
@@ -53,10 +54,18 @@ export async function signup(
 
   const existing = await getUserByEmail(db, email);
   const hash = await hashPassword(args.password);
+  let pending: string | null = null;
   if (existing) {
-    // Don't leak whether the account exists; just refresh the (unverified) hash
-    // and re-send a code. A verified account simply re-receives a code it won't need.
-    await updateUserPasswordHash(db, existing.id, hash);
+    // Never overwrite an existing account's password here: anyone can call
+    // signup with someone else's email. For a still-unverified account the new
+    // password is held with the code and applied only when the code is
+    // verified, which proves the caller controls the inbox. Re-sends respect
+    // the resend cooldown so this can't flood the inbox. Same 202 either way,
+    // so it doesn't reveal whether the account exists.
+    const current = await getOtp(db, email);
+    const cooldown = OTP_RESEND_COOLDOWN_SECONDS;
+    if (current && nowSec() - current.created_at < cooldown) return { ok: true, status: "pending_verification" };
+    if (existing.email_verified !== 1) pending = hash;
   } else {
     const id = (args.newUserId ?? newUlid)();
     await createUser(db, { id, email, passwordHash: hash });
@@ -64,7 +73,7 @@ export async function signup(
 
   const code = generateOtp();
   const ttl = args.otpTtlSeconds ?? OTP_TTL_SECONDS;
-  await upsertOtp(db, email, await hashOtp(code, args.secret), nowSec() + ttl);
+  await upsertOtp(db, email, await hashOtp(code, args.secret), nowSec() + ttl, pending);
   const ttlMinutes = Math.round(ttl / 60);
   const tpl = args.renderOtp?.({ code, ttlMinutes }) ?? otpEmail({ code, ttlMinutes, appName: args.appName });
   try {
@@ -78,19 +87,26 @@ export async function signup(
 export async function verifyOtp(
   db: D1Database,
   args: { email: string; code: string; secret: string },
-): Promise<Result<"no_account" | "expired" | "too_many_attempts" | "invalid_code", { userId: string; email: string }>> {
+): Promise<Result<"too_many_attempts" | "invalid_code", { userId: string; email: string }>> {
+  // One error for "no such account", "no code", "expired" and "wrong code", so
+  // the response doesn't reveal whether an account exists.
   const email = normEmail(args.email);
   const user = await getUserByEmail(db, email);
-  if (!user) return { ok: false, error: "no_account" };
+  if (!user) return { ok: false, error: "invalid_code" };
   const otp = await getOtp(db, email);
-  if (!otp) return { ok: false, error: "expired" };
-  if (otp.attempts >= OTP_MAX_ATTEMPTS) return { ok: false, error: "too_many_attempts" };
-  if (otp.expires_at < nowSec()) return { ok: false, error: "expired" };
+  if (!otp || otp.expires_at < nowSec()) return { ok: false, error: "invalid_code" };
+
+  // Spend the guess before comparing, atomically, so parallel requests can't
+  // all pass a "fewer than N attempts" check.
+  if (!(await claimOtpAttempt(db, email, OTP_MAX_ATTEMPTS))) return { ok: false, error: "too_many_attempts" };
 
   const candidate = await hashOtp(args.code, args.secret);
-  if (!otpHashEquals(candidate, otp.code_hash)) {
-    await incrementOtpAttempts(db, email);
-    return { ok: false, error: "invalid_code" };
+  if (!otpHashEquals(candidate, otp.code_hash)) return { ok: false, error: "invalid_code" };
+
+  // The password chosen at a re-signup of an unverified account takes effect
+  // only now that the caller has proved they control the inbox.
+  if (otp.pending_password_hash && user.email_verified !== 1) {
+    await updateUserPasswordHash(db, user.id, otp.pending_password_hash);
   }
   await markEmailVerified(db, user.id);
   await deleteOtp(db, email);
@@ -135,7 +151,9 @@ export async function requestPasswordReset(
   const user = await getUserByEmail(db, email);
   if (user) {
     const ttl = args.ttlSeconds ?? 60 * 60; // 1h
-    const token = await signToken(args.secret, user.id, "password_reset", ttl);
+    // Binding the security stamp makes the link single-use: once the password
+    // changes (by this link or any other way) the stamp changes and the link dies.
+    const token = await signToken(args.secret, `${user.id}:${await securityStamp(user)}`, "password_reset", ttl);
     const path = args.resetPath ?? "/reset";
     const resetUrl = `${args.appUrl.replace(/\/$/, "")}${path}?token=${encodeURIComponent(token)}`;
     const ttlHours = Math.max(1, Math.round(ttl / 3600));
@@ -154,8 +172,13 @@ export async function resetPassword(
   args: { token: string; newPassword: string; secret: string },
 ): Promise<Result<"invalid_token" | "weak_password", { userId: string }>> {
   if (args.newPassword.length < MIN_PASSWORD) return { ok: false, error: "weak_password" };
-  const userId = await verifyToken(args.secret, args.token, "password_reset");
-  if (!userId) return { ok: false, error: "invalid_token" };
+  const subject = await verifyToken(args.secret, args.token, "password_reset");
+  if (!subject) return { ok: false, error: "invalid_token" };
+  const idx = subject.lastIndexOf(":");
+  if (idx < 0) return { ok: false, error: "invalid_token" };
+  const userId = subject.slice(0, idx);
+  const user = await getUserById(db, userId);
+  if (!user || (await securityStamp(user)) !== subject.slice(idx + 1)) return { ok: false, error: "invalid_token" };
   await updateUserPasswordHash(db, userId, await hashPassword(args.newPassword));
   return { ok: true, userId };
 }
@@ -209,7 +232,8 @@ export async function requestEmailChange(
   const ttl = args.ttlSeconds ?? 60 * 60;
   // Subject binds BOTH the userId and the target email so the confirm link
   // can't be retargeted to a different address.
-  const token = await signToken(args.secret, `${user.id}:${newEmail}`, "email_change", ttl);
+  // Also bind the security stamp, so the link dies if the password changes.
+  const token = await signToken(args.secret, `${user.id}:${await securityStamp(user)}:${newEmail}`, "email_change", ttl);
   const path = args.confirmPath ?? "/confirm-email";
   const confirmUrl = `${args.appUrl.replace(/\/$/, "")}${path}?token=${encodeURIComponent(token)}`;
   const ttlHours = Math.max(1, Math.round(ttl / 3600));
@@ -228,10 +252,11 @@ export async function confirmEmailChange(
 ): Promise<Result<"invalid_token" | "email_taken", { userId: string; email: string }>> {
   const subject = await verifyToken(args.secret, args.token, "email_change");
   if (!subject) return { ok: false, error: "invalid_token" };
-  const idx = subject.indexOf(":");
-  if (idx < 0) return { ok: false, error: "invalid_token" };
-  const userId = subject.slice(0, idx);
-  const newEmail = subject.slice(idx + 1);
+  const [userId, stamp, ...rest] = subject.split(":");
+  const newEmail = rest.join(":");
+  if (!userId || !stamp || !newEmail) return { ok: false, error: "invalid_token" };
+  const user = await getUserById(db, userId);
+  if (!user || (await securityStamp(user)) !== stamp) return { ok: false, error: "invalid_token" };
   const res = await updateUserEmail(db, userId, newEmail);
   if (!res.ok) return { ok: false, error: "email_taken" };
   // A newly confirmed email is verified by definition.
@@ -248,10 +273,12 @@ export async function removeUser(
   const user = await getUserById(db, args.userId);
   if (!user) return { ok: false, error: "not_found" };
 
-  // Require an explicit confirm phrase as a deliberate guard.
-  if (args.confirmPhrase !== undefined && args.confirmPhrase.trim().toLowerCase() !== "delete my account") {
-    return { ok: false, error: "confirm_required" };
-  }
+  // Require an explicit confirm phrase as a deliberate guard. An account with
+  // no password (OAuth-only) has nothing else to prove intent, so for those
+  // the phrase is mandatory, not merely checked when supplied.
+  const phraseOk = args.confirmPhrase?.trim().toLowerCase() === "delete my account";
+  if (args.confirmPhrase !== undefined && !phraseOk) return { ok: false, error: "confirm_required" };
+  if (!hasRealPassword(user) && !phraseOk) return { ok: false, error: "confirm_required" };
 
   if (hasRealPassword(user)) {
     if (!args.currentPassword) return { ok: false, error: "password_required" };

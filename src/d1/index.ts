@@ -26,8 +26,12 @@ export {
   upsertOtp,
   getOtp,
   incrementOtpAttempts,
+  claimOtpAttempt,
   deleteOtp,
 } from "./users.js";
+
+// security stamp (sessions / single-use links) + constant-cost login check
+export { securityStamp, verifyPasswordOrDummy } from "./stamp.js";
 
 // otp helpers
 export {
